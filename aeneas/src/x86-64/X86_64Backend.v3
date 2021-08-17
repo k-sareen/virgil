@@ -8,7 +8,8 @@ class X86_64Backend extends MachBackend {
 	var asm: X86_64MacroAssembler;
 	def test: bool;
 	var codegen: SsaX86_64Gen;
-	var simpleAlloc: SimpleRegAlloc;
+	// var simpleAlloc: SimpleRegAlloc;
+	var simpleAlloc: LocalRegAlloc;
 
 	// memory allocator configuration
 	var objReg: X86_64Gpr;
@@ -34,7 +35,8 @@ class X86_64Backend extends MachBackend {
 			sizeReg = X86_64Regs.RAX;
 		}
 		codegen = SsaX86_64Gen.new(context, mach, asm, w);
-		simpleAlloc = SimpleRegAlloc.new(X86_64RegSet.SET, codegen);
+		// simpleAlloc = SimpleRegAlloc.new(X86_64RegSet.SET, codegen);
+		simpleAlloc = LocalRegAlloc.new(X86_64RegSet.SET, codegen);
 	}
 	def genEntryStub() {
 		var main = prog.getMain().asMethod();

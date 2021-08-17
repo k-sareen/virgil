@@ -28,6 +28,8 @@ syn keyword virgilType null
 syn keyword virgilType string
 syn keyword virgilType this true
 syn keyword virgilType void
+syn match   virgilType "i[0-9][0-9]\?"
+syn match   virgilType "u[0-9][0-9]\?"
 
 syn match virgilOperator "\v\-\>"
 syn match virgilOperator "\v\=\>"

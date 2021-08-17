@@ -1,54 +1,85 @@
 // Copyright 2021 Google Inc. All rights reserved.
 // See LICENSE for details of Apache 2.0 license.
 
-// Simple register allocator that spills everything to the stack between
-// instructions.
-class SimpleRegAlloc(regSet: MachRegSet, codegen: SsaMachGen) {
-	// kunals: Physical register -> Virtual register mapping
+// Block register allocator that spills everything to the stack between
+// SSA blocks.
+class LocalRegAlloc(regSet: MachRegSet, codegen: SsaMachGen) {
 	def curVreg = Array<VReg>.new(regSet.physRegs);
-	// kunals: Array of allocated physical registers
 	def allocated = Array<byte>.new(regSet.physRegs);
 	def parmoveDests = Vector<(VReg, List<Operand.Def>)>.new();
-	// kunals: index into allocated array
 	var cursor: int;
 
-	// kunals: allocate registers for all the instructions in `codegen`
-	def allocate() {
-		// kunals: go through all the instructions in increasing order
-		var i = codegen.first;
-		while (i != null) {
+	def printArchInstr(i: ArchInstr) {
+		var a = i.operands;
+		match (int.!(i.opcode())) {
+			ArchInstrs.ARCH_NOP => {
+				System.puts("nop \n");
+				// putOperands(a);
+			}
+			ArchInstrs.ARCH_ENTRY => {
+				System.puts("entry \n");
+				// putOperands(a);
+			}
+			ArchInstrs.ARCH_BLOCK => {
+				System.puts("block  ");
+				// putSsaBlock(Operand.Label.!(a[0]).block);
+			}
+			ArchInstrs.ARCH_BLOCK_END => {
+				System.puts("block end  ");
+				// putSsaBlock(Operand.Label.!(a[0]).block);
+			}
+			ArchInstrs.ARCH_PARMOVE => {
+				System.puts("parallel-move\n");
+				// var half = a.length / 2;
+				// for (i < half) {
+				// 	var dst = a[i], src = a[i + half];
+				// 	ln();
+				// 	putOperand(dst);
+				// 	puts(" <- ");
+				// 	putOperand(src);
+				// }
+			}
+			ArchInstrs.ARCH_RET => {
+				System.puts("ret  ");
+				// putOperands(a);
+			}
+			ArchInstrs.ARCH_END => {
+				System.puts("end  ");
+			}
+			_ => System.puts(Strings.format1("  unknown ArchInstr opcode 0x%x ", int.!(i.opcode())));
+		}
+	}
+
+	def allocBasicBlock(i: ArchInstr) -> ArchInstr {
+		while (i.opcode() != ArchInstrs.ARCH_BLOCK_END) {
+			printArchInstr(i);
 			var next = i.next;
-			// kunals: since this is a simple register allocator that only
-			// allocates for each instruction, we want to release all the
-			// allocated registers from the previous instruction.
-			// XXX: for the LocalRegisterAlloc we want to release the allocated
-			// instructions per basic block
-			release();
 			if (i.opcode() == ArchInstrs.ARCH_PARMOVE) {
 				i.remove();
 				doParallelMove(i, next);
 				i = next;
 				continue;
 			}
+
 			var operands = i.operands;
 			var first_def = true;
-			// kunals: go through all the operands used in instruction `i` and
-			// then assign them a register or memory location
+			System.puts(Strings.format1("operands: %d\n", operands.length));
 			for (j = operands.length - 1; j >= 0; j--) {
 				match (operands[j]) {
 					Use(vreg, constraint) => {
-						spillVar(vreg);
-						var loc = vreg.spill;
+						if (constraint == 0) allocRegOrSpill(vreg, constraint);
+						var loc = vreg.loc();
 						if (constraint != 0 || vreg.isConst()) {
 							loc = alloc(vreg, constraint);
 							codegen.insertRestoreLocal(vreg, loc, i);
 						}
 						operands[j] = Operand.Use(vreg, loc);
 					}
+
 					Overwrite(dst, use, constraint) => {
-						spillVar(use);
-						spillVar(dst);
-						var loc = use.spill;
+						if (constraint == 0) allocRegOrSpill(use, constraint);
+						allocRegOrSpill(dst, 0);
+						var loc = use.loc();
 						if (constraint != 0 || use.isConst()) {
 							loc = alloc(use, constraint);
 							codegen.insertRestoreLocal(use, loc, i);
@@ -56,29 +87,89 @@ class SimpleRegAlloc(regSet: MachRegSet, codegen: SsaMachGen) {
 						operands[j] = Operand.Overwrite(dst, use, loc);
 						codegen.insertSaveLocal(loc, dst, next);
 					}
+
 					Def(vreg, constraint) => {
 						if (first_def) {
 							release();
 							first_def = false;
 						}
-						spillVar(vreg);
-						var loc = vreg.spill;
+						if (constraint == 0) allocRegOrSpill(vreg, constraint);
+						var loc = vreg.loc();
 						if (constraint != 0) loc = alloc(vreg, constraint);
 						operands[j] = Operand.Def(vreg, loc);
 						if (constraint != 0) codegen.insertSaveLocal(loc, vreg, next);
 					}
+
 					_ => ;
 				}
 			}
+
 			i = next;
 		}
+
+		return i;
 	}
-	def spillVar(vreg: VReg) {
+
+	def allocate() {
+		System.puts("Starting register allocation\n");
+		System.puts(Strings.format1("  liveness:\n%q", codegen.liveness.render));
+		var i = codegen.first;
+		while (i != null) {
+			System.puts(Strings.format1("Allocate registers for ArchInstr %d\n", int.!(i.opcode())));
+			if (i.opcode() == ArchInstrs.ARCH_ENTRY
+					|| i.opcode() == ArchInstrs.ARCH_BLOCK_END
+					|| i.opcode() == ArchInstrs.ARCH_END) {
+				i = i.next;
+				continue;
+			} else if (i.opcode() == ArchInstrs.ARCH_BLOCK) {
+				release();
+				i = allocBasicBlock(i);
+			}
+		}
+	}
+
+	def allocRegOrSpill(vreg: VReg, constraint: int) -> int {
+		if (constraint == 0) {
+			// no constraint: use register class
+			var rclass = (vreg.regClass.tag + 1) >>> 2;
+			constraint = regSet.regClasses[rclass];
+		} else if (constraint >= regSet.regSets.length) {
+			// constraint is for a spill slot
+			return constraint;
+		}
+		var set = regSet.regSets[constraint];
+		// Check if existing register (if any) is in the constraint set
+		if (vreg.reg != 0) {
+			for (reg in set)
+				if (reg == vreg.reg) {
+					System.puts(Strings.format2("    allocate register %d to VReg %d\n", reg, vreg.varNum));
+					return reg;
+				}
+		}
+		// Allocate a register from the constraint set
+		for (reg in set) {
+			if (curVreg[reg] == null) {
+				curVreg[reg] = vreg;
+				allocated[cursor++] = reg;
+				if (vreg.reg == 0) vreg.reg = reg;
+				System.puts(Strings.format2("    allocate register %d to VReg %d\n", reg, vreg.varNum));
+				return reg;
+			}
+		}
+
+		return spillVar(vreg);
+	}
+
+	def spillVar(vreg: VReg) -> int {
 		if (vreg.spill == 0) {
 			// allocate a spill slot for the VReg
 			vreg.spill = codegen.frame.allocSpill(vreg.regClass);
+			System.puts(Strings.format2("    allocate spill slot %d for VReg %d\n", vreg.spill, vreg.varNum));
 		}
+
+		return vreg.spill;
 	}
+
 	def alloc(vreg: VReg, constraint: int) -> int {
 		if (constraint == 0) {
 			// no constraint: use register class
@@ -91,7 +182,11 @@ class SimpleRegAlloc(regSet: MachRegSet, codegen: SsaMachGen) {
 		var set = regSet.regSets[constraint];
 		// Check if existing register (if any) is in the constraint set
 		if (vreg.reg != 0) {
-			for (reg in set) if (reg == vreg.reg) return reg;
+			for (reg in set)
+				if (reg == vreg.reg) {
+					System.puts(Strings.format2("    allocate register %d to VReg %d\n", reg, vreg.varNum));
+					return reg;
+				}
 		}
 		// Allocate a register from the constraint set
 		for (reg in set) {
@@ -99,11 +194,13 @@ class SimpleRegAlloc(regSet: MachRegSet, codegen: SsaMachGen) {
 				curVreg[reg] = vreg;
 				allocated[cursor++] = reg;
 				if (vreg.reg == 0) vreg.reg = reg;
+				System.puts(Strings.format2("    allocate register %d to VReg %d\n", reg, vreg.varNum));
 				return reg;
 			}
 		}
 		return V3.fail1("out of registers in set %s", regSet.identify(constraint));
 	}
+
 	def release() {
 		for (i < cursor) { // Release all registers.
 			var num = allocated[i];
@@ -113,10 +210,12 @@ class SimpleRegAlloc(regSet: MachRegSet, codegen: SsaMachGen) {
 		}
 		cursor = 0;
 	}
+
 	def doParallelMove(i: ArchInstr, next: ArchInstr) {
 		codegen.gatherParallelMoveDests(i, parmoveDests);
 		for (j < parmoveDests.length) recursivelyEmitMoves(j, next);
 	}
+
 	def recursivelyEmitMoves(j: int, next: ArchInstr) {
 		var t = parmoveDests[j], vreg = t.0, dest = t.1;
 		if (vreg.parmoveState <= 0) return; // already done on or stack
@@ -144,6 +243,7 @@ class SimpleRegAlloc(regSet: MachRegSet, codegen: SsaMachGen) {
 		}
 		vreg.parmoveState = 0;
 	}
+
 	def getParallelMoveReg(rcl: RegClass, which: int) -> int {
 		var regSet = codegen.frame.conv.regSet;
 		var set = regSet.getRegSet(rcl);
@@ -151,5 +251,6 @@ class SimpleRegAlloc(regSet: MachRegSet, codegen: SsaMachGen) {
 		return loc;
 	}
 }
+
 def ON_STACK = -1;
 def IN_CYCLE = -2;
